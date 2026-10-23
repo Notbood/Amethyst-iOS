@@ -19,7 +19,7 @@ jobs:
           - platform: 2
             platform_name: ios
     
-    runs-on: J316sAP
+    runs-on: macos-26
     steps:
       - name: Remove work folders
         run: |
@@ -35,6 +35,15 @@ jobs:
 
       - name: Checkout repository submodules
         run: git submodule update --init --recursive
+
+      - name: Select Xcode 26
+        run: |
+          ls /Applications | grep Xcode || true
+          sudo xcode-select -s /Applications/Xcode_26.app 2>/dev/null \
+            || sudo xcode-select -s /Applications/Xcode_26.0.app 2>/dev/null \
+            || sudo xcode-select -s /Applications/Xcode_26.1.app 2>/dev/null \
+            || sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
 
       - name: Get gl4es latest commit hash
         id: gl4es-sha
