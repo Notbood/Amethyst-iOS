@@ -72,6 +72,7 @@ static GameSurfaceView* pojavWindow;
 - (void)viewDidLoad
 {
     [super viewDidLoad];
+    self.view.backgroundColor = UIColor.blackColor;
     isControlModifiable = NO;
     self.isMacCatalystApp = NSProcessInfo.processInfo.isMacCatalystApp;
     // Load MetalHUD library
@@ -115,13 +116,13 @@ static GameSurfaceView* pojavWindow;
 
     [self performSelector:@selector(initCategory_Navigation)];
     
-    self.surfaceView = [[GameSurfaceView alloc] initWithFrame:self.view.frame];
+    self.surfaceView = [[GameSurfaceView alloc] initWithFrame:[self letterboxedFrameForSize:self.view.bounds.size]];
     self.surfaceView.layer.contentsScale = screenScale * resolutionScale;
     self.surfaceView.layer.magnificationFilter = self.surfaceView.layer.minificationFilter = kCAFilterNearest;
     self.surfaceView.multipleTouchEnabled = YES;
     pojavWindow = self.surfaceView;
 
-    self.touchView = [[UIView alloc] initWithFrame:self.view.frame];
+    self.touchView = [[UIView alloc] initWithFrame:[self letterboxedFrameForSize:self.view.bounds.size]];
     self.touchView.backgroundColor = [UIColor colorWithRed:0 green:0 blue:0 alpha:1];
     self.touchView.multipleTouchEnabled = YES;
     [self.touchView addSubview:self.surfaceView];
@@ -361,6 +362,19 @@ static GameSurfaceView* pojavWindow;
     [self setNeedsUpdateOfPrefersPointerLocked];
 }
 
+- (CGRect)letterboxedFrameForSize:(CGSize)size {
+    const CGFloat targetRatio = 16.0 / 9.0;
+    CGFloat w = size.width;
+    CGFloat h = w / targetRatio;
+    if (h > size.height) {
+        h = size.height;
+        w = h * targetRatio;
+    }
+    return CGRectMake((size.width - w) * 0.5,
+                      (size.height - h) * 0.5,
+                      w, h);
+}
+
 - (void)updateSavedResolution {
     for (UIWindowScene *scene in UIApplication.sharedApplication.connectedScenes.allObjects) {
         self.screenScale = scene.screen.scale;
@@ -369,8 +383,12 @@ static GameSurfaceView* pojavWindow;
         }
     }
 
-    if (self.surfaceView.superview != nil) {
-        self.surfaceView.frame = self.surfaceView.superview.frame;
+    if (self.surfaceView.superview == self.touchView) {
+        // Internal display: fill the letterboxed touchView
+        self.surfaceView.frame = self.touchView.bounds;
+    } else if (self.surfaceView.superview != nil) {
+        // External/AirPlay display: keep original full-screen behaviour
+        self.surfaceView.frame = self.surfaceView.superview.bounds;
     }
 
     resolutionScale = getPrefFloat(@"video.resolution") / 100.0;
@@ -495,7 +513,7 @@ static GameSurfaceView* pojavWindow;
 
         CGRect frame = self.view.frame;
         frame.size = size;
-        self.touchView.frame = frame;
+        self.touchView.frame = [self letterboxedFrameForSize:size];
         self.inputTextField.frame = CGRectMake(0, -32.0, size.width, 30.0);
         [self viewWillTransitionToSize_Navigation:frame];
 
@@ -565,7 +583,7 @@ static GameSurfaceView* pojavWindow;
 
 - (void)sendTouchEvent:(UITouch *)touchEvent withUIEvent:(UIEvent *)uievent withEvent:(int)event
 {
-    CGPoint locationInView = [touchEvent locationInView:self.rootView];
+    CGPoint locationInView = [touchEvent locationInView:self.touchView];
 
     //if (touchEvent.view == self.surfaceView) {
         switch (event) {
@@ -609,7 +627,7 @@ static GameSurfaceView* pojavWindow;
             if ([self isTouchInactive:self.primaryTouch]) return; // FIXME: should be? ACTION_UP will never be sent
             if (event == ACTION_MOVE && isGrabbing) {
                 event = ACTION_MOVE_MOTION;
-                CGPoint prevLocationInView = [touchEvent previousLocationInView:self.rootView];
+                CGPoint prevLocationInView = [touchEvent previousLocationInView:self.touchView];
                 locationInView.x -= prevLocationInView.x;
                 locationInView.y -= prevLocationInView.y;
             }
@@ -725,7 +743,7 @@ static GameSurfaceView* pojavWindow;
     
     if (sender.state == UIGestureRecognizerStateRecognized && isGrabbing) {
         CGFloat screenScale = [[UIScreen mainScreen] scale];
-        CGPoint point = [sender locationInView:self.rootView];
+        CGPoint point = [sender locationInView:self.touchView];
         int hotbarSlot = self.enableHotbarGestures ?
             callback_SurfaceViewController_touchHotbar(point.x * screenScale, point.y * screenScale) : -1;
         if (hotbarSlot != -1 && currentHotbarSlot == hotbarSlot) {
@@ -738,7 +756,7 @@ static GameSurfaceView* pojavWindow;
 - (void)surfaceOnHover:(UIGestureRecognizer *)sender {
     if (isGrabbing) return;
     
-    CGPoint point = [sender locationInView:self.rootView];
+    CGPoint point = [sender locationInView:self.touchView];
     // NSLog(@"Mouse move!!");
     // NSLog(@"Mouse pos = %f, %f", point.x, point.y);
     switch (sender.state) {
@@ -767,7 +785,7 @@ static GameSurfaceView* pojavWindow;
     }
     
     if (!self.slideableHotbar) {
-        CGPoint location = [sender locationInView:self.rootView];
+        CGPoint location = [sender locationInView:self.touchView];
         CGFloat screenScale = UIScreen.mainScreen.scale;
         currentHotbarSlot = self.enableHotbarGestures ?
             callback_SurfaceViewController_touchHotbar(location.x * screenScale, location.y * screenScale) : -1;
@@ -985,7 +1003,7 @@ int touchesMovedCount;
         if (touch.type == UITouchTypeIndirectPointer) {
             continue; // handle this in a different place
         }
-        CGPoint locationInView = [touch locationInView:self.rootView];
+        CGPoint locationInView = [touch locationInView:self.touchView];
         CGFloat screenScale = [[UIScreen mainScreen] scale];
         currentHotbarSlot = self.enableHotbarGestures ?
             callback_SurfaceViewController_touchHotbar(locationInView.x * screenScale, locationInView.y * screenScale) : -1;
@@ -1008,7 +1026,7 @@ int touchesMovedCount;
     for (UITouch *touch in touches) {
         if (touch.type == UITouchTypeIndirectPointer) {
             if (!isGrabbing && !virtualMouseEnabled) {
-                CGPoint point = [touch locationInView:self.rootView];
+                CGPoint point = [touch locationInView:self.touchView];
                 [self sendTouchPoint:point withEvent:ACTION_MOVE];
             }
             continue; // handle this in a different place
