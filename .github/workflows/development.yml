@@ -37,10 +37,10 @@ jobs:
         run: git submodule update --init --recursive
 
       - name: Setup JDK 8
-              uses: actions/setup-java@v4
-              with:
-                distribution: 'zulu'
-                java-version: '8'      
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '8'      
                 
       - name: Select Xcode 26
         run: |
