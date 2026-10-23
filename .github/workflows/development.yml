@@ -102,6 +102,9 @@ jobs:
       - name: Install gmake
         run: brew install make
 
+      - name: Install ldid
+        run: brew install ldid
+
       - name: Build for iOS
         run: |
           export PATH=/opt/homebrew/bin:$PATH
