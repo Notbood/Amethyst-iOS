@@ -18,18 +18,18 @@ jobs:
         include:
           - platform: 2
             platform_name: ios
-    
+
     runs-on: macos-26
     steps:
       - name: Remove work folders
         run: |
-          echo "before"
+          echo before
           ls -lah ./
           rm -rf ./* || true
           rm -rf ./.??* || true
-          echo "after"
+          echo after
           ls -lah ./
-          
+
       - name: Checkout repository
         uses: actions/checkout@main
 
@@ -44,21 +44,21 @@ jobs:
 
       - name: Verify JDK
         run: |
-          echo "JAVA_HOME is: $JAVA_HOME"
+          echo JAVA_HOME=$JAVA_HOME
           $JAVA_HOME/bin/java -version
 
       - name: Select Xcode 26
         run: |
           ls /Applications | grep Xcode || true
-          sudo xcode-select -s /Applications/Xcode_26.app 2>/dev/null \
-            || sudo xcode-select -s /Applications/Xcode_26.0.app 2>/dev/null \
-            || sudo xcode-select -s /Applications/Xcode_26.1.app 2>/dev/null \
-            || sudo xcode-select -s /Applications/Xcode.app
+          sudo xcode-select -s /Applications/Xcode_26.app 2>/dev/null || \
+          sudo xcode-select -s /Applications/Xcode_26.0.app 2>/dev/null || \
+          sudo xcode-select -s /Applications/Xcode_26.1.app 2>/dev/null || \
+          sudo xcode-select -s /Applications/Xcode.app
           xcodebuild -version
 
       - name: Get gl4es latest commit hash
         id: gl4es-sha
-        run: echo "::set-output name=sha::$(echo $(git ls-remote https://github.com/PojavLauncherTeam/gl4es-114-extra refs/heads/master | grep -io '^\S*'))"
+        run: echo sha=$(git ls-remote https://github.com/PojavLauncherTeam/gl4es-114-extra refs/heads/master | grep -io '^\S*') >> $GITHUB_OUTPUT
         shell: bash
 
       - name: Cache gl4es
@@ -90,7 +90,7 @@ jobs:
             -DCMAKE_C_FLAGS=-Wno-error=implicit-function-declaration
           cmake --build build --config RelWithDebInfo --target GL
           cp -R lib/libGL.dylib ../Natives/resources/Frameworks/libgl4es_114.dylib
-          
+
       - name: Push gl4es
         if: false && github.event != 'pull_request' && github.ref_name == 'main' && steps.gl4es-cache.outputs.cache-hit != 'true'
         continue-on-error: true
@@ -102,46 +102,39 @@ jobs:
       - name: Install gmake
         run: brew install make
 
-      - name: Build for ${{ matrix.platform_name }}
+      - name: Build for iOS
         run: |
           export PATH=/opt/homebrew/bin:$PATH
           export SLIMMED=1
-          if [ "${{ matrix.platform_name }}" ==ios" ]; then
-            gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=${{ matrix.platform }} BOOTJDK=$JAVA_HOME/bin
-            gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=${{ matrix.platform }} TROLLSTORE_JIT_ENT=1 BOOTJDK=$JAVA_HOME/bin
-          elif [ "${{ matrix.platform_name }}" == "tvos" ]; then
-            gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=${{ matrix.platform }} TROLLSTORE_JIT_ENT=1 BOOTJDK=$JAVA_HOME/bin
-          else
-            gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=${{ matrix.platform }} BOOTJDK=$JAVA_HOME/bin
-          fi
+          gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=2 BOOTJDK=$JAVA_HOME/bin
+          gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=2 TROLLSTORE_JIT_ENT=1 BOOTJDK=$JAVA_HOME/bin
 
       - name: Upload regular ipa
         uses: actions/upload-artifact@main
         with:
-          name: org.angelauramc.amethyst-${{ matrix.platform_name }}.ipa
-          path: artifacts/org.angelauramc.amethyst-*-${{ matrix.platform_name }}.ipa
+          name: org.angelauramc.amethyst-ios.ipa
+          path: artifacts/org.angelauramc.amethyst-*-ios.ipa
 
       - name: Upload regular tipa
         uses: actions/upload-artifact@main
         with:
-          name: org.angelauramc.amethyst-${{ matrix.platform_name }}-trollstore.tipa
-          path: artifacts/org.angelauramc.amethyst-*-${{ matrix.platform_name }}-trollstore.tipa
+          name: org.angelauramc.amethyst-ios-trollstore.tipa
+          path: artifacts/org.angelauramc.amethyst-*-ios-trollstore.tipa
 
       - name: Upload slimmed ipa
         uses: actions/upload-artifact@main
         with:
-          name: org.angelauramc.amethyst.slimmed-${{ matrix.platform_name }}.ipa
-          path: artifacts/org.angelauramc.amethyst.slimmed-*-${{ matrix.platform_name }}.ipa
+          name: org.angelauramc.amethyst.slimmed-ios.ipa
+          path: artifacts/org.angelauramc.amethyst.slimmed-*-ios.ipa
 
       - name: Upload slimmed tipa
         uses: actions/upload-artifact@main
         with:
-          name: org.angelauramc.amethyst.slimmed-${{ matrix.platform_name }}-trollstore.tipa
-          path: artifacts/org.angelauramc.amethyst.slimmed-*-${{ matrix.platform_name }}-trollstore.tipa
+          name: org.angelauramc.amethyst.slimmed-ios-trollstore.tipa
+          path: artifacts/org.angelauramc.amethyst.slimmed-*-ios-trollstore.tipa
 
       - name: Upload PojavLauncher.dSYM
         uses: actions/upload-artifact@main
-        if: matrix.platform_name == 'ios'
         with:
           name: AngelAuraAmethyst.dSYM
           path: artifacts/AngelAuraAmethyst.dSYM
