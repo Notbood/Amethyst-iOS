@@ -1,0 +1,284 @@
+name: MC LWJGL/SDL scan
+
+# Diagnostic only. Finds which SDL / LWJGL APIs a Minecraft version really calls,
+# and which of them are missing from the LWJGL jars bundled in JavaApp/libs/lwjgl.
+# Run from the Actions tab (workflow_dispatch). Results: artifact "mc-lwjgl-scan".
+
+on:
+  workflow_dispatch:
+    inputs:
+      mc_version:
+        description: "Minecraft version id to scan"
+        required: true
+        default: "26.3"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Download version JSON and client jar
+        env:
+          MC: ${{ inputs.mc_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p scan && cd scan
+          curl -fsSL https://piston-meta.mojang.com/mc/game/version_manifest_v2.json -o manifest.json
+          VURL=$(jq -r --arg v "$MC" '.versions[] | select(.id==$v) | .url' manifest.json)
+          test -n "$VURL" || { echo "version $MC not found in manifest"; exit 1; }
+          curl -fsSL "$VURL" -o version.json
+          curl -fsSL "$(jq -r '.downloads.client.url' version.json)" -o client.jar
+          jq '{id, mainClass, javaVersion, jvm: .arguments.jvm, game: .arguments.game}' version.json > version_summary.json
+          jq -r '.libraries[] | [.name, ((.rules // []) | tostring)] | @tsv' version.json | grep -Ei 'lwjgl|jna' | sort > libraries_lwjgl_jna.txt || true
+
+      - name: Download lwjgl-sdl from Maven Central
+        run: |
+          set -euo pipefail
+          cd scan
+          LV=$(jq -r '.libraries[].name | select(startswith("org.lwjgl:lwjgl-sdl:")) | split(":")[2]' version.json | head -1)
+          test -n "$LV" || { echo "this version has no lwjgl-sdl library"; exit 1; }
+          echo "lwjgl-sdl version: $LV" | tee lwjgl_sdl_version.txt
+          B=https://repo1.maven.org/maven2/org/lwjgl/lwjgl-sdl/$LV
+          curl -fsSL "$B/lwjgl-sdl-$LV.jar" -o lwjgl-sdl.jar
+          curl -fsSL "$B/lwjgl-sdl-$LV-natives-macos-arm64.jar" -o lwjgl-sdl-natives-macos-arm64.jar || true
+          unzip -Z1 lwjgl-sdl.jar | sort > lwjgl_sdl_jar_contents.txt
+          (unzip -Z1 lwjgl-sdl-natives-macos-arm64.jar || true) | sort > lwjgl_sdl_natives_contents.txt
+          # The fork builds JavaApp with JDK 8 javac: class files above major 52 would not compile against it
+          { unzip -p lwjgl-sdl.jar org/lwjgl/sdl/SDLVideo.class || true; } | head -c 8 | od -An -tu1 \
+            | awk '{print "SDLVideo.class major version:", $7*256+$8, "(52 = Java 8)"}' | tee lwjgl_sdl_classversion.txt
+
+      - name: Extract references
+        run: |
+          set -uo pipefail
+          cd scan
+          classes_of() { unzip -Z1 "$1" | grep -E '[.]class$' | grep -v module-info | sed -E 's/[.]class$//; s#/#.#g'; }
+          refs_of() {
+            classes_of "$1" > "$1.classes"
+            xargs -a "$1.classes" -n 200 javap -c -p -cp "$1" 2>/dev/null | awk '
+              /^[A-Za-z]/ && /(class|interface|enum|record) / && /[{][[:space:]]*$/ {
+                c=$0; sub(/[[:space:]]+(extends|implements)[[:space:]].*$/,"",c); sub(/[[:space:]]*[{][[:space:]]*$/,"",c);
+                n=split(c,a," "); cls=a[n]; next }
+              /\/\/ (Method|InterfaceMethod|Field|class) (org\/lwjgl|com\/sun\/jna)\// { r=$0; sub(/^.*\/\/ /,"",r); print cls "\t" r }
+            ' > "$2" || true
+          }
+          refs_of client.jar client_refs.tsv
+          refs_of lwjgl-sdl.jar sdlj_refs.tsv
+          wc -l client_refs.tsv sdlj_refs.tsv
+          grep -P '\t(Method|InterfaceMethod|Field|class) com/sun/jna' client_refs.tsv | sort -u > jna_refs_used_by_client.tsv || true
+
+      - name: Bundled LWJGL signatures
+        run: |
+          set -uo pipefail
+          ls -l JavaApp/libs/lwjgl/*.jar
+          BCP=$(ls JavaApp/libs/lwjgl/*.jar | tr '\n' ':')
+          for j in JavaApp/libs/lwjgl/*.jar; do
+            unzip -Z1 "$j" | grep -E '[.]class$' | grep -v module-info | sed -E 's/[.]class$//; s#/#.#g'
+          done > scan/bundled_classes.txt
+          xargs -a scan/bundled_classes.txt -n 200 javap -p -s -cp "$BCP" > scan/bundled_sigs.txt 2>/dev/null || true
+          wc -l scan/bundled_classes.txt scan/bundled_sigs.txt
+
+      - name: Compare
+        run: |
+          set -euo pipefail
+          cd scan
+          cat > compare.py <<'PY'
+          import re, sys, collections
+
+          CLIENT_REFS, SDLJ_REFS, BUNDLED_SIGS, OUT = sys.argv[1:5]
+
+          KINDS = ("Method", "InterfaceMethod", "Field", "class")
+
+
+          def strip_generics(s):
+              out, depth = [], 0
+              for ch in s:
+                  if ch == "<":
+                      depth += 1
+                  elif ch == ">":
+                      depth = max(0, depth - 1)
+                  elif depth == 0:
+                      out.append(ch)
+              return "".join(out)
+
+
+          def norm(name):
+              return name.replace(".", "/")
+
+
+          # ---------- bundled signatures (javap -p -s output) ----------
+          classes = {}  # name -> dict(super, ifaces, members)
+          cur = None
+          pending = None
+          hdr = re.compile(r"^(?:[a-z]+ )*(class|interface|enum|record) ")
+          for line in open(BUNDLED_SIGS, encoding="utf-8", errors="replace"):
+              line = line.rstrip("\n")
+              if line and line[0] not in " \t}" and hdr.match(line) and line.rstrip().endswith("{"):
+                  h = strip_generics(line.rstrip().rstrip("{").strip())
+                  parts = h.split()
+                  i = next(k for k, p in enumerate(parts) if p in ("class", "interface", "enum", "record"))
+                  kind, name = parts[i], parts[i + 1]
+                  rest = parts[i + 2:]
+                  sup, ifaces = None, []
+                  if "extends" in rest:
+                      e = rest.index("extends")
+                      tail = rest[e + 1:]
+                      if kind == "interface":
+                          ifaces += [norm(t.strip(",")) for t in tail if t.strip(",")]
+                      else:
+                          sup = norm(tail[0].strip(","))
+                  if "implements" in rest:
+                      e = rest.index("implements")
+                      ifaces += [norm(t.strip(",")) for t in rest[e + 1:] if t.strip(",")]
+                  if sup is None and kind == "class":
+                      sup = "java/lang/Object"
+                  cur = {"super": sup, "ifaces": ifaces, "members": set()}
+                  classes[norm(name)] = cur
+                  pending = None
+                  continue
+              if cur is None:
+                  continue
+              if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(";"):
+                  pending = line.strip()
+                  continue
+              m = re.match(r"^\s{4}descriptor: (.+)$", line)
+              if m and pending:
+                  desc = m.group(1).strip()
+                  decl = strip_generics(pending.rstrip(";"))
+                  if "(" in decl:
+                      tok = decl[: decl.index("(")].split()[-1] if decl[: decl.index("(")].split() else ""
+                      if decl.startswith("static {}"):
+                          nm = "<clinit>"
+                      elif "." in tok:
+                          nm = "<init>"
+                      else:
+                          nm = tok
+                  else:
+                      nm = decl.split()[-1]
+                  cur["members"].add((nm, desc))
+                  pending = None
+
+
+          OBJ = {"toString", "hashCode", "equals", "getClass", "notify", "notifyAll", "wait", "clone", "finalize", "<init>"}
+
+
+          JDKCOMMON = {"close", "run", "compareTo", "iterator", "get", "apply", "accept", "call", "name", "ordinal",
+                       "values", "valueOf", "getMessage", "getCause", "addSuppressed", "getSuppressed", "printStackTrace"}
+
+
+          def has_member(cls, name, desc, depth=0):
+              """True = found, False = definitely missing, None = unknown (leaves the bundled set)."""
+              if cls == "java/lang/Object":
+                  return name in OBJ
+              c = classes.get(cls)
+              if c is None and cls.startswith(("java/", "javax/")):
+                  return name in JDKCOMMON
+              if c is None or depth > 30:
+                  return None
+              if (name, desc) in c["members"]:
+                  return True
+              unknown = False
+              for s in [c["super"]] + c["ifaces"]:
+                  if not s:
+                      continue
+                  r = has_member(s, name, desc, depth + 1)
+                  if r is True:
+                      return True
+                  if r is None:
+                      unknown = True
+              return None if unknown else False
+
+
+          def parse_refs(path):
+              rows = []
+              for line in open(path, encoding="utf-8", errors="replace"):
+                  line = line.rstrip("\n")
+                  if "\t" not in line:
+                      continue
+                  caller, ref = line.split("\t", 1)
+                  kind, _, rest = ref.partition(" ")
+                  if kind not in KINDS:
+                      continue
+                  rest = rest.strip()
+                  if kind == "class":
+                      owner = rest.strip('"')
+                      owner = re.sub(r"^\[+L?", "", owner).rstrip(";")
+                      rows.append((caller, kind, owner, "", ""))
+                  else:
+                      if '"' in rest:
+                          continue
+                      owner, _, nd = rest.partition(".")
+                      name, _, desc = nd.partition(":")
+                      rows.append((caller, kind, owner, name, desc))
+              return rows
+
+
+          def analyse(rows, label, out):
+              missing_cls = collections.Counter()
+              missing_mem = collections.Counter()
+              for caller, kind, owner, name, desc in rows:
+                  if not owner.startswith("org/lwjgl/") or owner.startswith("org/lwjgl/sdl/"):
+                      continue
+                  if owner not in classes:
+                      missing_cls[owner] += 1
+                      continue
+                  if kind != "class":
+                      if has_member(owner, name, desc) is False:
+                          missing_mem[f"{owner}.{name}:{desc}"] += 1
+              out.write(f"\n=== {label}: org.lwjgl classes referenced but absent from bundled jars ===\n")
+              for k, v in sorted(missing_cls.items()):
+                  out.write(f"{k}  (x{v})\n")
+              out.write(f"\n=== {label}: members referenced but absent from bundled jars (likely NoSuchMethodError/NoSuchFieldError) ===\n")
+              for k, v in sorted(missing_mem.items()):
+                  out.write(f"{k}  (x{v})\n")
+              return len(missing_cls), len(missing_mem)
+
+
+          client = parse_refs(CLIENT_REFS)
+          sdlj = parse_refs(SDLJ_REFS)
+
+          with open(OUT, "w") as out:
+              out.write(f"bundled classes parsed: {len(classes)}\n")
+              n = analyse(client, "MINECRAFT CLIENT", out)
+              out.write(f"\n(client summary: {n[0]} missing classes, {n[1]} missing members)\n")
+              n2 = analyse(sdlj, "LWJGL-SDL JAR (its calls into core LWJGL)", out)
+              out.write(f"\n(lwjgl-sdl summary: {n2[0]} missing classes, {n2[1]} missing members)\n")
+
+          # SDL API surface used by the game itself
+          sdl_used = collections.defaultdict(set)
+          callers = set()
+          for caller, kind, owner, name, desc in client:
+              if owner.startswith("org/lwjgl/sdl/"):
+                  key = owner if kind == "class" else f"{owner}.{name}:{desc}"
+                  sdl_used[owner].add((kind, key))
+                  callers.add(f"{caller}\t{kind}\t{key}")
+          with open(OUT.replace("report", "sdl_api_used"), "w") as f:
+              for owner in sorted(sdl_used):
+                  f.write(f"# {owner}\n")
+                  for kind, key in sorted(sdl_used[owner], key=lambda t: (t[0] != "class", t[1])):
+                      f.write(f"  {kind:16s} {key}\n")
+          with open(OUT.replace("report", "sdl_callers"), "w") as f:
+              f.write("\n".join(sorted(callers)) + "\n")
+          print(f"sdl owners used by client: {len(sdl_used)}; refs: {sum(len(v) for v in sdl_used.values())}")
+          PY
+          python3 compare.py client_refs.tsv sdlj_refs.tsv bundled_sigs.txt report.txt
+          {
+            echo '### MC LWJGL/SDL scan'
+            echo '```'
+            cat lwjgl_sdl_version.txt
+            head -c 6000 sdl_api_used.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mc-lwjgl-scan
+          path: |
+            scan/*.txt
+            scan/*.tsv
+            scan/*.json
