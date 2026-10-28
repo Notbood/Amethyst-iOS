@@ -11,6 +11,10 @@ jobs:
     runs-on: macos-latest
     env:
       GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        # plain bash: no -e, no pipefail. Recon must never abort on a grep with no match or a closed pipe.
+        shell: bash {0}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -18,7 +22,6 @@ jobs:
 
       - name: What this repo bundles today
         run: |
-          set -uo pipefail
           mkdir -p out && cd out
           F=../Natives/resources/Frameworks
           {
@@ -44,7 +47,6 @@ jobs:
 
       - name: Upstream and related repos
         run: |
-          set -uo pipefail
           cd out
           g() { echo "\$ gh api $*"; gh api "$@" 2>&1; echo; }
           for R in AngelAuraMC/amethyst-prebuilt-libraries AngelAuraMC/lwjgl3 AngelAuraMC/SPIRV-Cross AngelAuraMC/Amethyst-iOS AngelAuraMC/Amethyst-Android ryanmurf/Amethyst-iOS; do
@@ -69,7 +71,6 @@ jobs:
 
       - name: ryanmurf lwjgl-341 branch vs upstream
         run: |
-          set -uo pipefail
           cd out
           C="repos/AngelAuraMC/Amethyst-iOS/compare/main...ryanmurf:lwjgl-341"
           gh api "$C" --jq '{status,ahead_by,behind_by,total_commits,files:(.files|length)}' > ryanmurf_compare_summary.json 2>&1
@@ -78,6 +79,7 @@ jobs:
           gh api "repos/ryanmurf/Amethyst-iOS/git/trees/lwjgl-341?recursive=1" --jq '.tree[].path' 2>&1 | grep -iE 'lwjgl|JavaApp/libs|Frameworks|\.jar$|\.dylib$' > ryanmurf_tree_filtered.txt
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: lwjgl-recon
           path: out/*
