@@ -1,0 +1,83 @@
+name: LWJGL recon (route B)
+
+# Read-only reconnaissance for the LWJGL 3.4.3 upgrade. Changes nothing.
+# Run from the Actions tab (workflow_dispatch). Result: artifact "lwjgl-recon".
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recon:
+    runs-on: macos-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: What this repo bundles today
+        run: |
+          set -uo pipefail
+          mkdir -p out && cd out
+          F=../Natives/resources/Frameworks
+          {
+            for f in "$F"/*.dylib; do
+              echo "--- $(basename "$f")"
+              lipo -info "$f" 2>&1 | head -1
+              vtool -show-build "$f" 2>&1 | grep -E 'platform|minos|sdk' | tr '\n' ' '; echo
+              echo "exported symbols: $(nm -gU "$f" 2>/dev/null | wc -l)"
+            done
+            echo
+            echo "JNI symbols in liblwjgl.dylib: $(nm -gU "$F/liblwjgl.dylib" 2>/dev/null | grep -c 'Java_org_lwjgl_system_JNI_')"
+            echo "libffi symbols in liblwjgl.dylib: $(nm -gU "$F/liblwjgl.dylib" 2>/dev/null | grep -ci 'ffi')"
+          } > frameworks_dylibs.txt 2>&1
+          strings "$F/liblwjgl.dylib" | grep -iE 'lwjgl|[0-9]\.[0-9]+\.[0-9]+|ffi' | head -60 > liblwjgl_strings.txt
+          for j in ../JavaApp/libs/lwjgl/*.jar; do
+            echo "--- $(basename "$j") ($(wc -c < "$j") bytes, $(unzip -Z1 "$j" | grep -c '[.]class$') classes)"
+            unzip -p "$j" META-INF/MANIFEST.MF 2>/dev/null | grep -Ei 'Implementation-Version|Implementation-Title|Bundle-Version|Build-Date|Built-By' || true
+          done > jars_lwjgl.txt 2>&1
+          unzip -p ../JavaApp/libs/lwjgl/lwjgl.jar org/lwjgl/Version.class 2>/dev/null | strings | grep -E '^[0-9]+[.][0-9]+' | head -5 >> jars_lwjgl.txt
+          cat ../.gitmodules > gitmodules.txt 2>&1
+          git -C .. log --format='%h %ad %s' --date=short -n 25 -- JavaApp/libs/lwjgl Natives/resources/Frameworks > history_libs.txt 2>&1
+          git -C .. log --format='%h %ad %s' --date=short -n 15 > history_recent.txt 2>&1
+
+      - name: Upstream and related repos
+        run: |
+          set -uo pipefail
+          cd out
+          g() { echo "\$ gh api $*"; gh api "$@" 2>&1; echo; }
+          for R in AngelAuraMC/amethyst-prebuilt-libraries AngelAuraMC/lwjgl3 AngelAuraMC/SPIRV-Cross AngelAuraMC/Amethyst-iOS AngelAuraMC/Amethyst-Android ryanmurf/Amethyst-iOS; do
+            N=$(echo "$R" | tr '/' '_')
+            {
+              g "repos/$R" --jq '{full_name,description,default_branch,pushed_at,size}'
+              g "repos/$R/branches?per_page=60" --jq '.[].name'
+              g "repos/$R/tags?per_page=30" --jq '.[].name'
+              g "repos/$R/contents" --jq '.[]|.type+" "+.path'
+              g "repos/$R/contents/.github/workflows" --jq '.[].path'
+              g "repos/$R/commits?per_page=40" --jq '.[]|.commit.committer.date[0:10]+" "+.sha[0:7]+" "+(.commit.message|split("\n")[0])'
+              g "repos/$R/releases?per_page=10" --jq '.[]|[.tag_name,.published_at[0:10],(.assets|map(.name)|join(","))]|@tsv'
+            } > "repo_$N.txt"
+          done
+          gh pr list -R AngelAuraMC/Amethyst-iOS --state all --limit 60 --json number,title,state,headRefName,updatedAt --jq '.[]|[.number,.state,.updatedAt[0:10],.headRefName,.title]|@tsv' > upstream_ios_prs.tsv 2>&1
+          gh api "repos/AngelAuraMC/Amethyst-Android/commits?per_page=100" --jq '.[]|.commit.committer.date[0:10]+" "+.sha[0:7]+" "+(.commit.message|split("\n")[0])' 2>&1 | grep -iE 'lwjgl|sdl|26[.]3|spvc|spirv|3[.]4' > android_relevant_commits.txt || true
+          for p in $(gh api repos/AngelAuraMC/amethyst-prebuilt-libraries/contents/.github/workflows --jq '.[].path' 2>/dev/null); do
+            gh api "repos/AngelAuraMC/amethyst-prebuilt-libraries/contents/$p" -H 'Accept: application/vnd.github.raw' > "prebuilt_$(basename "$p")" 2>&1
+          done
+          gh api repos/AngelAuraMC/amethyst-prebuilt-libraries/readme -H 'Accept: application/vnd.github.raw' > prebuilt_README.txt 2>&1
+          gh api repos/AngelAuraMC/lwjgl3/readme -H 'Accept: application/vnd.github.raw' 2>&1 | head -c 20000 > lwjgl3_fork_README.txt
+
+      - name: ryanmurf lwjgl-341 branch vs upstream
+        run: |
+          set -uo pipefail
+          cd out
+          C="repos/AngelAuraMC/Amethyst-iOS/compare/main...ryanmurf:lwjgl-341"
+          gh api "$C" --jq '{status,ahead_by,behind_by,total_commits,files:(.files|length)}' > ryanmurf_compare_summary.json 2>&1
+          gh api "$C" --jq '.files[]|[.status,.filename,.additions,.deletions]|@tsv' > ryanmurf_changed_files.tsv 2>&1
+          gh api -H 'Accept: application/vnd.github.v3.diff' "$C" 2>&1 | head -c 3000000 > ryanmurf_lwjgl341.diff
+          gh api "repos/ryanmurf/Amethyst-iOS/git/trees/lwjgl-341?recursive=1" --jq '.tree[].path' 2>&1 | grep -iE 'lwjgl|JavaApp/libs|Frameworks|\.jar$|\.dylib$' > ryanmurf_tree_filtered.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lwjgl-recon
+          path: out/*
