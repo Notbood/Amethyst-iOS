@@ -1,7 +1,7 @@
 name: MC LWJGL/SDL scan
 
 # Diagnostic only. Finds which SDL / LWJGL APIs a Minecraft version really calls,
-# and which of them are missing from the LWJGL jars bundled in JavaApp/libs/lwjgl.
+# and which of them are missing from the chosen LWJGL jar set (input lwjgl_libs).
 # Run from the Actions tab (workflow_dispatch). Results: artifact "mc-lwjgl-scan".
 
 on:
@@ -11,12 +11,25 @@ on:
         description: "Minecraft version id to scan"
         required: true
         default: "26.3"
+      lwjgl_libs:
+        description: "Jar folder to compare against (default = ryanmurf's LWJGL 3.4.1 set; use JavaApp/libs/lwjgl for this repo's 3.3.3 set)"
+        required: true
+        default: "r341/JavaApp/libs/lwjgl-3.4.1"
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Fetch ryanmurf lwjgl-341 jars (comparison set)
+        uses: actions/checkout@v4
+        with:
+          repository: ryanmurf/Amethyst-iOS
+          ref: lwjgl-341
+          path: r341
+          sparse-checkout: |
+            JavaApp/libs
 
       - uses: actions/setup-java@v4
         with:
@@ -48,6 +61,11 @@ jobs:
           curl -fsSL "$B/lwjgl-sdl-$LV.jar" -o lwjgl-sdl.jar
           curl -fsSL "$B/lwjgl-sdl-$LV-natives-macos-arm64.jar" -o lwjgl-sdl-natives-macos-arm64.jar || true
           unzip -Z1 lwjgl-sdl.jar | sort > lwjgl_sdl_jar_contents.txt
+          # Fork CI compiles with JDK 8 javac (BOOTJDK=$JAVA_HOME/bin): the jar must be class version <= 52
+          unzip -p lwjgl-sdl.jar org/lwjgl/sdl/SDL.class | head -c 8 | od -An -tu1 \
+            | awk '{print "lwjgl-sdl class file major version: " ($7*256+$8) " (52 = Java 8, 55 = Java 11, 61 = Java 17)"}' \
+            | tee lwjgl_sdl_class_version.txt
+          unzip -Z1 lwjgl-sdl.jar | grep -c '^META-INF/versions/' | sed 's/^/multi-release entries: /' | tee -a lwjgl_sdl_class_version.txt || true
           (unzip -Z1 lwjgl-sdl-natives-macos-arm64.jar || true) | sort > lwjgl_sdl_natives_contents.txt
           # The fork builds JavaApp with JDK 8 javac: class files above major 52 would not compile against it
           { unzip -p lwjgl-sdl.jar org/lwjgl/sdl/SDLVideo.class || true; } | head -c 8 | od -An -tu1 \
@@ -75,9 +93,11 @@ jobs:
       - name: Bundled LWJGL signatures
         run: |
           set -uo pipefail
-          ls -l JavaApp/libs/lwjgl/*.jar
-          BCP=$(ls JavaApp/libs/lwjgl/*.jar | tr '\n' ':')
-          for j in JavaApp/libs/lwjgl/*.jar; do
+          L="${{ inputs.lwjgl_libs }}"
+          echo "comparing against: $L" | tee scan/compared_against.txt
+          ls -l "$L"/*.jar | tee -a scan/compared_against.txt
+          BCP=$(ls "$L"/*.jar | tr '\n' ':')
+          for j in "$L"/*.jar; do
             unzip -Z1 "$j" | grep -E '[.]class$' | grep -v module-info | sed -E 's/[.]class$//; s#/#.#g'
           done > scan/bundled_classes.txt
           xargs -a scan/bundled_classes.txt -n 200 javap -p -s -cp "$BCP" > scan/bundled_sigs.txt 2>/dev/null || true
@@ -276,6 +296,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: mc-lwjgl-scan
           path: |
