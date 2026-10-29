@@ -115,6 +115,12 @@ jobs:
           gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=2 BOOTJDK=$JAVA_HOME/bin
           gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=2 TROLLSTORE_JIT_ENT=1 BOOTJDK=$JAVA_HOME/bin
 
+      - name: Give spvc the file name LWJGL expects
+        run: |
+          D=Natives/resources/Frameworks/lwjgl34
+          ls -l "$D"
+          cp "$D/libspirv-cross-c-shared.0.68.0.dylib" "$D/libspirv-cross.dylib"
+
       - name: Upload regular ipa
         uses: actions/upload-artifact@main
         with:
