@@ -1,0 +1,87 @@
+name: Bring LWJGL 3.4.1 branch into this fork (route B)
+
+# Squash-merges ryanmurf's LWJGL 3.4.1 / Java 25 work (upstream PR #293) into a NEW branch of this fork.
+# Never touches your .github/workflows files. Keeps your own changes (16:9 etc).
+# Run from the Actions tab (workflow_dispatch). Result: branch "lwjgl-b" (or the name you choose).
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Repository with the LWJGL 3.4.1 work"
+        required: true
+        default: "ryanmurf/Amethyst-iOS"
+      source_ref:
+        description: "Branch to bring in"
+        required: true
+        default: "lwjgl-341"
+      base_branch:
+        description: "Your branch to start from"
+        required: true
+        default: "main"
+      target_branch:
+        description: "New branch to create (overwritten if it already exists)"
+        required: true
+        default: "lwjgl-b"
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 0
+
+      - name: Squash-merge
+        # plain bash: no -e, a conflicted merge returns 1 on purpose
+        shell: bash {0}
+        env:
+          SRC_URL: https://github.com/${{ inputs.source_repo }}.git
+          REF: ${{ inputs.source_ref }}
+          TARGET: ${{ inputs.target_branch }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -b "$TARGET"
+          git fetch -q "$SRC_URL" "$REF" || { echo "::error::could not fetch $SRC_URL $REF"; exit 1; }
+          git merge --squash FETCH_HEAD
+          echo "squash merge exit code: $?"
+
+          # Never touch workflow files: restore main's version, drop workflow files that only exist on their side.
+          git checkout HEAD -- .github/workflows 2>/dev/null
+          for f in $(git ls-files .github/workflows); do
+            git cat-file -e "HEAD:$f" 2>/dev/null || git rm -qf "$f"
+          done
+
+          # Take their side for the renderer submodule config; they belong together with their Makefile change.
+          for f in $(git diff --name-only --diff-filter=U); do
+            case "$f" in
+              .gitmodules)
+                git checkout --theirs -- "$f" && git add "$f" && echo "took theirs: $f" ;;
+              Natives/external/MobileGlues)
+                SHA=$(git ls-tree FETCH_HEAD "$f" | awk '{print $3}')
+                git update-index --cacheinfo "160000,$SHA,$f" && echo "took theirs (submodule): $f" ;;
+            esac
+          done
+
+          LEFT=$(git diff --name-only --diff-filter=U)
+          if [ -n "$LEFT" ]; then
+            echo "::error::unresolved conflicts, send me this list:"
+            echo "$LEFT"
+            exit 1
+          fi
+
+          git diff --cached --quiet && { echo "::error::nothing to commit"; exit 1; }
+          git commit -q -m "Bring in LWJGL 3.4.1 dual-version support (squash of $SRC_URL $REF)"
+          echo "== files changed vs base:"; git diff --stat HEAD~1 | tail -n 5
+
+      - name: Push new branch
+        shell: bash {0}
+        env:
+          TARGET: ${{ inputs.target_branch }}
+        run: |
+          git push --force origin "HEAD:refs/heads/$TARGET" && echo "Pushed branch $TARGET" | tee -a "$GITHUB_STEP_SUMMARY"
