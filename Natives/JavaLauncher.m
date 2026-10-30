@@ -266,6 +266,16 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
     margv[++margc] = [NSString stringWithFormat:@"-Xmx%dM", allocmem].UTF8String;
     NSString *lwjglNativesFolder = [lwjglFolder isEqualToString:@"lwjgl-3.4.1"] ? @"lwjgl34" : @"lwjgl33";
     margv[++margc] = [NSString stringWithFormat:@"-Djava.library.path=%@/Frameworks:%@/Frameworks/%@", NSBundle.mainBundle.bundlePath, NSBundle.mainBundle.bundlePath, lwjglNativesFolder].UTF8String;
+    // LWJGL 3.4.x: point LWJGL straight at its natives folder. With the two-entry java.library.path above,
+    // LWJGL's own library search did not find libspirv-cross.dylib (Minecraft 26.x died in Spvc.<clinit>).
+    if ([lwjglFolder isEqualToString:@"lwjgl-3.4.1"]) {
+        NSString *lwjglNativesDir = [NSString stringWithFormat:@"%@/Frameworks/%@", NSBundle.mainBundle.bundlePath, lwjglNativesFolder];
+        margv[++margc] = [NSString stringWithFormat:@"-Dorg.lwjgl.librarypath=%@", lwjglNativesDir].UTF8String;
+        NSString *spvcLib = [lwjglNativesDir stringByAppendingPathComponent:@"libspirv-cross-c-shared.0.68.0.dylib"];
+        if ([NSFileManager.defaultManager fileExistsAtPath:spvcLib]) {
+            margv[++margc] = [NSString stringWithFormat:@"-Dorg.lwjgl.spvc.libname=%@", spvcLib].UTF8String;
+        }
+    }
     margv[++margc] = [NSString stringWithFormat:@"-Duser.dir=%@", gameDir].UTF8String;
     margv[++margc] = [NSString stringWithFormat:@"-Duser.home=%s", getenv("AME_HOME")].UTF8String;
     margv[++margc] = [NSString stringWithFormat:@"-Duser.timezone=%@", NSTimeZone.localTimeZone.name].UTF8String;
