@@ -1,0 +1,75 @@
+name: Bump MobileGlues to upstream (test branch, route B)
+
+# Creates a NEW test branch from your lwjgl-b with the MobileGlues submodule moved to upstream MobileGlues
+# (2.0.x: big multidraw / shader fixes). lwjgl-b itself is not changed. Builds nothing; run "Development build"
+# on the new branch afterwards. Refuses to bump if the MobileGlues-cpp/ layout the Makefile expects is gone.
+# Run from the Actions tab (workflow_dispatch).
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_branch:
+        description: "Branch to start from"
+        required: true
+        default: "lwjgl-b"
+      new_branch:
+        description: "New test branch (overwritten if it exists)"
+        required: true
+        default: "lwjgl-b-mg2"
+      mg_repo:
+        description: "MobileGlues repository"
+        required: true
+        default: "MobileGL-Dev/MobileGlues"
+      mg_ref:
+        description: "Branch of that repository"
+        required: true
+        default: "main"
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 0
+
+      - name: Bump submodule on a new branch
+        shell: bash {0}
+        env:
+          MG_REPO: ${{ inputs.mg_repo }}
+          MG_REF: ${{ inputs.mg_ref }}
+          NEW: ${{ inputs.new_branch }}
+        run: |
+          SHA=$(gh api "repos/$MG_REPO/commits/$MG_REF" --jq .sha 2>&1)
+          case "$SHA" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+            *) echo "::error::could not resolve $MG_REPO @ $MG_REF: $SHA"; exit 1 ;;
+          esac
+          echo "target MobileGlues: $MG_REPO @ $SHA"
+          echo "commit: $(gh api "repos/$MG_REPO/commits/$SHA" --jq '.commit.committer.date[0:10] + " " + (.commit.message|split("\n")[0])')"
+
+          # Our Makefile builds MobileGlues from MobileGlues-cpp/ - refuse to bump if that layout is gone.
+          if ! gh api "repos/$MG_REPO/contents/MobileGlues-cpp/CMakeLists.txt?ref=$SHA" --jq .path >/dev/null 2>&1; then
+            echo "::error::MobileGlues-cpp/CMakeLists.txt not found at $SHA. Top level of that commit:"
+            gh api "repos/$MG_REPO/contents?ref=$SHA" --jq '.[]|.type+" "+.path'
+            echo "Send me this list; the Makefile path has to change before the bump is safe."
+            exit 1
+          fi
+          echo "layout ok: MobileGlues-cpp/CMakeLists.txt exists"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -b "$NEW"
+          git config -f .gitmodules submodule.Natives/external/MobileGlues.url "https://github.com/$MG_REPO"
+          git config -f .gitmodules submodule.Natives/external/MobileGlues.branch "$MG_REF"
+          git update-index --cacheinfo "160000,$SHA,Natives/external/MobileGlues"
+          git add .gitmodules
+          if git diff --cached --quiet; then echo "Nothing to change (already on $SHA)"; exit 0; fi
+          git commit -q -m "Bump MobileGlues submodule to $MG_REPO@${SHA:0:7} ($MG_REF)"
+          git push --force origin "HEAD:refs/heads/$NEW" && echo "Pushed branch $NEW (MobileGlues $MG_REPO@${SHA:0:7})" | tee -a "$GITHUB_STEP_SUMMARY"
