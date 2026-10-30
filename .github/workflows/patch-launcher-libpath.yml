@@ -1,0 +1,68 @@
+name: Patch JavaLauncher.m - LWJGL 3.4.x library path (route B)
+
+# Adds -Dorg.lwjgl.librarypath (and the spvc library path) to the JVM flags for LWJGL 3.4.x launches,
+# then commits the change to the chosen branch. Safe to run twice. Does not touch workflow files.
+# Run from the Actions tab (workflow_dispatch). Afterwards run "Development build" on that branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to patch"
+        required: true
+        default: "lwjgl-b"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Patch and push
+        shell: bash {0}
+        env:
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          python3 - Natives/JavaLauncher.m <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding="utf-8").read()
+
+          if "org.lwjgl.librarypath" in s:
+              print("already patched, nothing to do")
+              sys.exit(0)
+
+          anchor = ('    margv[++margc] = [NSString stringWithFormat:@"-Djava.library.path=%@/Frameworks:%@/Frameworks/%@", '
+                    'NSBundle.mainBundle.bundlePath, NSBundle.mainBundle.bundlePath, lwjglNativesFolder].UTF8String;\n')
+          n = s.count(anchor)
+          if n != 1:
+              print("ANCHOR NOT FOUND EXACTLY ONCE (%d)" % n)
+              sys.exit(1)
+
+          addition = '''    // LWJGL 3.4.x: point LWJGL straight at its natives folder. With the two-entry java.library.path above,
+              // LWJGL's own library search did not find libspirv-cross.dylib (Minecraft 26.x died in Spvc.<clinit>).
+              if ([lwjglFolder isEqualToString:@"lwjgl-3.4.1"]) {
+                  NSString *lwjglNativesDir = [NSString stringWithFormat:@"%@/Frameworks/%@", NSBundle.mainBundle.bundlePath, lwjglNativesFolder];
+                  margv[++margc] = [NSString stringWithFormat:@"-Dorg.lwjgl.librarypath=%@", lwjglNativesDir].UTF8String;
+                  NSString *spvcLib = [lwjglNativesDir stringByAppendingPathComponent:@"libspirv-cross-c-shared.0.68.0.dylib"];
+                  if ([NSFileManager.defaultManager fileExistsAtPath:spvcLib]) {
+                      margv[++margc] = [NSString stringWithFormat:@"-Dorg.lwjgl.spvc.libname=%@", spvcLib].UTF8String;
+                  }
+              }
+          '''
+          s = s.replace(anchor, anchor + addition, 1)
+          open(p, "w", encoding="utf-8").write(s)
+          print("patched", p)
+          PY
+          if [ $? -ne 0 ]; then echo "::error::could not patch JavaLauncher.m (anchor missing?) - send me this log"; exit 1; fi
+          if git diff --quiet; then echo "No changes: branch already has the fix"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Natives/JavaLauncher.m
+          git commit -q -m "JavaLauncher: give LWJGL 3.4.x its natives folder (org.lwjgl.librarypath + spvc libname)"
+          git push origin "HEAD:refs/heads/$BRANCH" && echo "Pushed fix to $BRANCH" | tee -a "$GITHUB_STEP_SUMMARY"
