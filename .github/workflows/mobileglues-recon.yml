@@ -1,0 +1,68 @@
+name: MobileGlues recon (route B)
+
+# Read-only. Finds which MobileGlues version a branch builds with, and whether newer commits/releases exist
+# (26.2 currently dies inside MobileGlues' glslang). Run from the Actions tab. Result: artifact "mg-recon".
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to inspect"
+        required: true
+        default: "lwjgl-b"
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: bash {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Inspect
+        run: |
+          mkdir -p out && cd out
+          g() { echo "\$ gh api $*"; gh api "$@" 2>&1; echo; }
+          SHA=$(git -C .. ls-tree HEAD Natives/external/MobileGlues | awk '{print $3}')
+          URL=$(git config -f ../.gitmodules --get-regexp 'submodule\..*\.url' | grep -i mobileglues | awk '{print $2}' | head -1)
+          R=$(echo "$URL" | sed -E 's#https://github.com/##; s#[.]git$##; s#/$##')
+          {
+            echo "== .gitmodules"; cat ../.gitmodules
+            echo; echo "== pinned gitlink: $(git -C .. ls-tree HEAD Natives/external/MobileGlues)"
+            echo "pinned sha: $SHA"; echo "submodule repo: $R ($URL)"
+            echo; echo "== Natives/external dir in branch:"; git -C .. ls-tree HEAD Natives/external/ | awk '{print $2, $3, $4}'
+          } > pinned.txt 2>&1
+          DEF=$(gh api "repos/$R" --jq .default_branch 2>/dev/null)
+          {
+            g "repos/$R" --jq '{full_name,default_branch,pushed_at,description}'
+            g "repos/$R/commits/$SHA" --jq '{sha,date:.commit.committer.date,message:.commit.message}'
+            g "repos/$R/branches?per_page=60" --jq '.[].name'
+            g "repos/$R/compare/$SHA...$DEF" --jq '{status,ahead_by,behind_by,total_commits}'
+            g "repos/$R/compare/$SHA...$DEF" --jq '.commits[]|.commit.committer.date[0:10]+" "+.sha[0:7]+" "+(.commit.message|split("\n")[0])'
+          } > submodule_repo_vs_pinned.txt 2>&1
+          grep -iE 'glslang|lvalue|spirv|26[.]|crash|shader|ios|metal' submodule_repo_vs_pinned.txt > submodule_repo_keyword_commits.txt
+          for U in MobileGL-Dev/MobileGlues MobileGL-Dev/MobileGlues-release; do
+            N=$(echo "$U" | tr '/' '_')
+            DU=$(gh api "repos/$U" --jq .default_branch 2>/dev/null)
+            {
+              g "repos/$U" --jq '{full_name,default_branch,pushed_at}'
+              g "repos/$U/branches?per_page=60" --jq '.[].name'
+              g "repos/$U/releases?per_page=12" --jq '.[]|[.tag_name,.published_at[0:10],.name]|@tsv'
+              g "repos/$U/commits?per_page=60" --jq '.[]|.commit.committer.date[0:10]+" "+.sha[0:7]+" "+(.commit.message|split("\n")[0])'
+              g "repos/$U/compare/$SHA...$DU" --jq '{status,ahead_by,behind_by,total_commits}'
+            } > "upstream_$N.txt" 2>&1
+          done
+          g "repos/AngelAuraMC/Amethyst-iOS/contents/Natives/external/MobileGlues?ref=main" --jq '{type,sha,submodule_git_url}' > amethyst_upstream_pointer.txt 2>&1
+          gh api repos/AngelAuraMC/Amethyst-iOS/contents/.gitmodules?ref=main -H 'Accept: application/vnd.github.raw' >> amethyst_upstream_pointer.txt 2>&1
+          { echo '### MobileGlues recon'; echo '```'; head -c 3500 pinned.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mg-recon
+          path: out/*
