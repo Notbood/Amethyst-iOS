@@ -1,9 +1,23 @@
 #!/usr/bin/env python3
-"""Darwin cannot do __attribute__((alias("x"))). Rewrite every such declaration into a forwarding function.
-Usage: patch_mobileglues.py <MobileGlues-cpp dir>   (idempotent, prints what it changed)"""
+"""Make MobileGlues (written for Linux/Android) compile on Darwin. Idempotent, prints what it changed.
+  1) __attribute__((alias("x"))) is unsupported on Darwin -> rewritten into forwarding functions
+  2) syscall(__NR_gettid) does not exist on Darwin -> pthread_threadid_np helper
+Usage: patch_mobileglues.py <MobileGlues-cpp dir>"""
 import os, re, sys
 
 root = sys.argv[1]
+tid_re = re.compile(r"syscall\s*\(\s*(?:__NR_gettid|SYS_gettid)\s*\)")
+inc_re = re.compile(r"^[ \t]*#[ \t]*include[^\n]*$", re.M)
+TID_HELPER = """
+#ifdef __APPLE__
+#ifndef MG_DARWIN_TID_DEFINED
+#define MG_DARWIN_TID_DEFINED
+#include <pthread.h>
+#include <stdint.h>
+static inline long mg_darwin_tid() { uint64_t t = 0; pthread_threadid_np(NULL, &t); return (long)t; }
+#endif
+#endif
+"""
 alias_re = re.compile(r'__attribute__\s*\(\(\s*alias\s*\(\s*"(\w+)"\s*\)\s*\)\)\s*;')
 SKIP = {"GLAPI", "GLAPIENTRY", "extern", "static", "inline", "APIENTRY"}
 
@@ -46,24 +60,38 @@ for dp, _, files in os.walk(root):
         if not fn.endswith((".c", ".cc", ".cpp", ".h", ".hpp")):
             continue
         path = os.path.join(dp, fn)
+        rel = os.path.relpath(path, root)
         s = open(path, encoding="utf-8", errors="replace").read()
-        if "alias(" not in s:
-            continue
-        out, pos, n = [], 0, 0
-        for m in alias_re.finditer(s):
-            before = s[pos:m.start()]
-            b = max(before.rfind(";"), before.rfind("}"), before.rfind("{")) + 1
-            keep, chunk = before[:b], before[b:]
-            lines = chunk.split("\n")
-            while lines and (not lines[0].strip() or lines[0].lstrip().startswith(("#", "//"))):
-                keep += lines.pop(0) + "\n"
-            new, name = convert("\n".join(lines), m.group(1))
-            out.append(keep + new)
-            pos = m.end()
-            n += 1
-            print("  %s: %s -> forwards to %s" % (os.path.relpath(path, root), name, m.group(1)))
-        if n:
+        orig = s
+
+        # --- pass 1: alias attributes ---
+        if "alias(" in s:
+            out, pos = [], 0
+            for m in alias_re.finditer(s):
+                before = s[pos:m.start()]
+                b = max(before.rfind(";"), before.rfind("}"), before.rfind("{")) + 1
+                keep, chunk = before[:b], before[b:]
+                lines = chunk.split("\n")
+                while lines and (not lines[0].strip() or lines[0].lstrip().startswith(("#", "//"))):
+                    keep += lines.pop(0) + "\n"
+                new, name = convert("\n".join(lines), m.group(1))
+                out.append(keep + new)
+                pos = m.end()
+                changed += 1
+                print("  %s: %s -> forwards to %s" % (rel, name, m.group(1)))
             out.append(s[pos:])
-            open(path, "w", encoding="utf-8").write("".join(out))
+            s = "".join(out)
+
+        # --- pass 2: gettid ---
+        m = tid_re.search(s)
+        if m:
+            incs = [i for i in inc_re.finditer(s) if i.end() <= m.start()]
+            at = incs[-1].end() if incs else 0
+            s = s[:at] + "\n" + TID_HELPER + s[at:]
+            s, n = tid_re.subn("mg_darwin_tid()", s)
             changed += n
-print("patch_mobileglues: converted %d alias declaration(s)" % changed)
+            print("  %s: %d x syscall(gettid) -> mg_darwin_tid()" % (rel, n))
+
+        if s != orig:
+            open(path, "w", encoding="utf-8").write(s)
+print("patch_mobileglues: %d change(s)" % changed)
