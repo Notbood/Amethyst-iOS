@@ -36,6 +36,43 @@ jobs:
       - name: Checkout repository submodules
         run: git submodule update --init --recursive
 
+      # ---- route B: make sure the LWJGL 3.4.1 files are really there, then fix the spvc file name ----
+      - name: LWJGL 3.4.1 natives and jars fix
+        shell: bash {0}
+        run: |
+          F=Natives/resources/Frameworks
+          echo "ref: $GITHUB_REF"
+          git log --oneline -3
+          echo "--- BEFORE: Frameworks"; ls -l "$F" | head -60
+          echo "--- BEFORE: lwjgl33 / lwjgl34"; ls -l "$F/lwjgl33" "$F/lwjgl34" 2>&1 | head -40
+          echo "--- BEFORE: JavaApp/libs"; ls -l JavaApp/libs
+
+          # Restore the PR's LWJGL files from ryanmurf's branch (no-op if the merge already brought them)
+          git fetch --depth 1 https://github.com/ryanmurf/Amethyst-iOS lwjgl-341 || echo "WARNING: fetch of lwjgl-341 failed"
+          for p in "$F/lwjgl33" "$F/lwjgl34" "$F/libopenal.dylib" "$F/libshaderc.dylib" \
+                   JavaApp/libs/lwjgl-3.3.3 JavaApp/libs/lwjgl-3.4.1; do
+            git checkout FETCH_HEAD -- "$p" && echo "restored: $p" || echo "WARNING: could not restore $p"
+          done
+
+          # The PR moved the LWJGL natives into lwjgl33/ and lwjgl34/. Stale copies at the Frameworks root
+          # would be found first on java.library.path and mix 3.3.3 natives into the 3.4.1 jars.
+          if [ -d "$F/lwjgl34" ]; then
+            for n in libfreetype liblwjgl liblwjgl_nanovg liblwjgl_opengl liblwjgl_stb liblwjgl_tinyfd liblwjgl_vma; do
+              [ -f "$F/$n.dylib" ] && rm -f "$F/$n.dylib" && echo "removed stale root copy: $n.dylib"
+            done
+          fi
+
+          # LWJGL asks for libspirv-cross.dylib, the PR ships libspirv-cross-c-shared.0.68.0.dylib
+          S="$F/lwjgl34/libspirv-cross-c-shared.0.68.0.dylib"
+          if [ -f "$S" ]; then
+            cp "$S" "$F/lwjgl34/libspirv-cross.dylib" && echo "spvc: copied to libspirv-cross.dylib"
+          else
+            echo "WARNING: $S not found"
+          fi
+          echo "--- AFTER: lwjgl34"; ls -l "$F/lwjgl34" 2>&1
+          file "$F/lwjgl34/libspirv-cross.dylib" 2>&1 | head -2
+          vtool -show-build "$F/lwjgl34/libspirv-cross.dylib" 2>&1 | grep -E 'platform|minos' | tr '\n' ' '; echo
+
       - name: Setup JDK 8
         uses: actions/setup-java@v4
         with:
@@ -47,14 +84,17 @@ jobs:
           echo JAVA_HOME=$JAVA_HOME
           $JAVA_HOME/bin/java -version
 
-      - name: Select Xcode 26
+      - name: Select Xcode 26 (newest installed)
         run: |
-          ls /Applications | grep Xcode || true
-          sudo xcode-select -s /Applications/Xcode_26.app 2>/dev/null || \
-          sudo xcode-select -s /Applications/Xcode_26.0.app 2>/dev/null || \
-          sudo xcode-select -s /Applications/Xcode_26.1.app 2>/dev/null || \
-          sudo xcode-select -s /Applications/Xcode.app
+          ls -d /Applications/Xcode*.app || true
+          X=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$X" ] || X=/Applications/Xcode.app
+          echo "Using $X"
+          sudo xcode-select -s "$X/Contents/Developer"
           xcodebuild -version
+          echo "iphoneos SDK: $(xcrun --sdk iphoneos --show-sdk-version) ($(xcrun --sdk iphoneos --show-sdk-build-version))"
+          echo "iphonesimulator SDK: $(xcrun --sdk iphonesimulator --show-sdk-version) ($(xcrun --sdk iphonesimulator --show-sdk-build-version))"
+          xcrun simctl list runtimes || true
 
       - name: Get gl4es latest commit hash
         id: gl4es-sha
@@ -105,8 +145,14 @@ jobs:
       - name: Install ldid
         run: brew install ldid
 
-      - name: Download iOS Simulator Platform
-        run: sudo xcodebuild -downloadPlatform iOS
+      - name: Download iOS Simulator Platform (only if no runtime is installed)
+        continue-on-error: true
+        run: |
+          if xcrun simctl list runtimes | grep -q 'iOS '; then
+            echo "an iOS simulator runtime is already installed, skipping download"
+          else
+            sudo xcodebuild -downloadPlatform iOS
+          fi
 
       - name: Build for iOS
         run: |
