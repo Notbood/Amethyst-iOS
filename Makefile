@@ -319,6 +319,7 @@ dep_mg:
 		-DCMAKE_C_FLAGS="-arch arm64" \
 		$(SOURCEDIR)/Natives/external/MobileGlues/MobileGlues-cpp/
 
+	python3 $(SOURCEDIR)/Natives/patch_mobileglues.py $(SOURCEDIR)/Natives/external/MobileGlues/MobileGlues-cpp
 	cmake --build $(WORKINGDIR)/mobileglues --config RelWithDebInfo -j$(JOBS) --target mobileglues
 	cp $(WORKINGDIR)/mobileglues/libmobileglues.dylib $(WORKINGDIR)/libmobileglues.dylib
 	echo '[Amethyst v$(VERSION)] dep_mg - end'
